@@ -1,3 +1,383 @@
+# Chapter 10 User microposts
+
+Chapter9
+saw the completion of the REST actions for the Users resource, so the time has
+finally come to add a second full resource: user _microposts_.1 These are
+short messages associated with a particular user, first seen in larval form in
+Chapter2. In this chapter, we will
+make a full-strength version of the sketch from
+Section2.3 by
+constructing the Micropost data model, associating it with the User model
+using the `has_many` and `belongs_to` methods, and then making the forms and
+partials needed to manipulate and display the results. In
+Chapter11, we'll complete our
+tiny Twitter clone by adding the notion of _following_ users in order to
+receive a _feed_ of their microposts.
+
+If you're using Git for version control, I suggest making a topic branch as
+usual:
+
+    
+    $ git checkout -b user-microposts
+    
+
+## 10.1 A Micropost model
+
+We begin the Microposts resource by creating a Micropost model, which captures
+the essential characteristics of microposts. What follows builds on the work
+from Section2.3;
+as with the model in that section, our new Micropost model will include data
+validations and an association with the User model. Unlike that model, the
+present Micropost model will be fully tested, and will also have a default
+_ordering_ and automatic _destruction_ if its parent user is destroyed.
+
+### 10.1.1 The basic model
+
+The Micropost model needs only two attributes: a `content` attribute to hold
+the micropost's content,2 and a `user_id` to associate a micropost with a
+particular user. As with the case of the User model
+([Listing6.1](modeling-users.html#code-
+generate_user_model)), we generate it using `generate model`:
+
+    
+    $ rails generate model Micropost content:string user_id:integer
+    
+
+This produces a migration to create a `microposts` table in the database
+([Listing10.1](user-microposts.html#code-
+micropost_migration)); compare it to the analogous migration for the `users`
+table from [Listing6.2](modeling-users.html#code-
+users_migration).
+
+Listing 10.1. The Micropost migration. (Note the index on `user_id` and
+`created_at`.)
+
+`db/migrate/[timestamp]_create_microposts.rb`
+
+    
+    class CreateMicroposts < ActiveRecord::Migration
+      def change
+        create_table :microposts do |t|
+          t.string :content
+          t.integer :user_id
+    
+          t.timestamps
+        end
+        add_index :microposts, [:user_id, :created_at]
+      end
+    end
+    
+
+Note that, since we expect to retrieve all the microposts associated with a
+given userid in reverse order of creation,
+[Listing10.1](user-microposts.html#code-
+micropost_migration) adds an index ([Box6.2](modeling-
+users.html#sidebar-database_indices)) on the `user_id` and `created_at`
+columns:
+
+    
+    add_index :microposts, [:user_id, :created_at]
+    
+
+By including both the `user_id` and `created_at` columns as an array, we
+arrange for Rails to create a _multiple key index_, which means that Active
+Record uses _both_ keys at the same time. Note also the `t.timestamps` line,
+which (as mentioned in [Section6.1.1](modeling-users.html
+#sec-database_migrations)) adds the magic `created_at` and `updated_at`
+columns. We'll put the `created_at` column to work in
+[Section10.1.4](user-microposts.html#sec-
+ordering_and_dependency) and [Section10.2.1](user-
+microposts.html#sec-augmenting_the_user_show_page).
+
+We'll start with some minimal tests for the Micropost model based on the
+analogous tests for the User model ([Listing6.8](modeling-
+users.html#code-user_spec)). In particular, we verify that a micropost object
+responds to the `content` and `user_id` attributes, as shown in
+[Listing10.2](user-microposts.html#code-
+initial_micropost_spec).
+
+Listing 10.2. The initial Micropost spec.
+
+`spec/models/micropost_spec.rb`
+
+    
+    require 'spec_helper'
+    
+    describe Micropost do
+    
+      let(:user) { FactoryGirl.create(:user) }
+      before do
+        # This code is wrong!
+        @micropost = Micropost.new(content: "Lorem ipsum", user_id: user.id)
+      end
+    
+      subject { @micropost }
+    
+      it { should respond_to(:content) }
+      it { should respond_to(:user_id) }
+    end
+    
+
+We can get these tests to pass by running the microposts migration and
+preparing the test database:
+
+    
+    $ bundle exec rake db:migrate
+    $ bundle exec rake db:test:prepare
+    
+
+The result is a Micropost model with the structure shown in
+Figure10.1.
+
+!micropost_model
+
+Figure 10.1: The Micropost data model.
+
+You should verify that the tests pass:
+
+    
+    $ bundle exec rspec spec/models/micropost_spec.rb
+    
+
+Even though the tests are passing, you might have noticed this code:
+
+    
+    let(:user) { FactoryGirl.create(:user) }
+    before do
+      # This code is wrong!
+      @micropost = Micropost.new(content: "Lorem ipsum", user_id: user.id)
+    end
+    
+
+The comment indicates that the code in the `before` block is wrong. See if you
+can guess why. We'll see the answer in the next section.
+
+### [10.1.2 Accessible attributes and the first validation](user-
+microposts.html#sec-accessible_attribute)
+
+To see why the code in the `before` block is wrong, we first start with
+validation tests for the Micropost model ([Listing10.3
+](user-microposts.html#code-micropost_validity_test)). (Compare with the User
+model tests in [Listing6.11](modeling-users.html#code-
+failing_validates_name_spec).)
+
+Listing 10.3. Tests for the validity of a new micropost.
+
+`spec/models/micropost_spec.rb`
+
+    
+    require 'spec_helper'
+    
+    describe Micropost do
+    
+      let(:user) { FactoryGirl.create(:user) }
+      before do
+        # This code is wrong!
+        @micropost = Micropost.new(content: "Lorem ipsum", user_id: user.id)
+      end
+    
+      subject { @micropost }
+    
+      it { should respond_to(:content) }
+      it { should respond_to(:user_id) }
+    
+      it { should be_valid }
+    
+      describe "when user_id is not present" do
+        before { @micropost.user_id = nil }
+        it { should_not be_valid }
+      end
+    end
+    
+
+This code requires that the micropost be valid and tests for the presence of
+the `user_id` attribute. We can get these tests to pass with the simple
+presence validation shown in [Listing10.4](user-
+microposts.html#code-micropost_user_id_validation).
+
+Listing 10.4. A validation for the micropost's `user_id`.
+
+`app/models/micropost.rb`
+
+    
+    class Micropost < ActiveRecord::Base
+      attr_accessible :content, :user_id  
+      validates :user_id, presence: true
+    end
+    
+
+Now we're prepared to see why
+
+    
+    @micropost = Micropost.new(content: "Lorem ipsum", user_id: user.id)
+    
+
+is wrong. The problem is that by default (as of Rails3.2.3)
+_all_ of the attributes for our Micropost model are accessible. As discussed
+in [Section6.1.2.2](modeling-users.html#sec-
+accessible_attributes) and [Section9.4.1.1](updating-
+showing-and-deleting-users.html#sec-revisiting_attr_accessible), this means
+that anyone could change any aspect of a micropost object simply by using a
+command-line client to issue malicious requests. For example, a malicious user
+could change the `user_id` attributes on microposts, thereby associating
+microposts with the wrong users. This means that we should remove `:user_id`
+from the `attr_accessible` list, and once we do, the code above will fail.
+We'll fix this issue in [Section10.1.3](user-
+microposts.html#sec-user_micropost_associations).
+
+### [10.1.3 User/Micropost associations](user-microposts.html#sec-
+user_micropost_associations)
+
+When constructing data models for web applications, it is essential to be able
+to make _associations_ between individual models. In the present case, each
+micropost is associated with one user, and each user is associated with
+(potentially) many microposts--a relationship seen briefly in
+[Section2.3.3](a-demo-app.html#sec-
+demo_user_has_many_microposts) and shown schematically in
+[Figure10.2](user-microposts.html#fig-
+micropost_belongs_to_user) and [Figure10.3](user-
+microposts.html#fig-user_has_many_microposts). As part of implementing these
+associations, we'll write tests for the Micropost model that, unlike
+[Listing10.2](user-microposts.html#code-
+initial_micropost_spec), are compatible with the use of `attr_accessible` in
+[Listing10.7](user-microposts.html#code-
+micropost_accessible_attribute).
+
+!micropost_belongs_to_user
+
+Figure 10.2: The `belongs_to` relationship between a micropost and its user.
+
+!user_has_many_microposts
+
+Figure 10.3: The `has_many` relationship between a user and its microposts.
+
+Using the `belongs_to`/`has_many` association defined in this section, Rails
+constructs the methods shown in [Table10.1](user-
+microposts.html#table-association_methods).
+
+**Method****Purpose**
+
+`micropost.user`
+
+Return the User object associated with the micropost.
+
+`user.microposts`
+
+Return an array of the user's microposts.
+
+`user.microposts.create(arg)`
+
+Create a micropost (`user_id = user.id`).
+
+`user.microposts.create!(arg)`
+
+Create a micropost (exception on failure).
+
+`user.microposts.build(arg)`
+
+Return a new Micropost object (`user_id = user.id`).
+
+Table 10.1: A summary of user/micropost association methods.
+
+Note from [Table10.1](user-microposts.html#table-
+association_methods) that instead of
+
+    
+    Micropost.create
+    Micropost.create!
+    Micropost.new
+    
+
+we have
+
+    
+    user.microposts.create
+    user.microposts.create!
+    user.microposts.build
+    
+
+This pattern is the canonical way to make a micropost: _through_ its
+association with a user. When a new micropost is made in this way, its
+`user_id` is _automatically_ set to the right value, which fixes the issue
+noted in [Section10.1.2](user-microposts.html#sec-
+accessible_attribute). In particular, we can replace the code
+
+    
+    let(:user) { FactoryGirl.create(:user) }
+    before do
+      # This code is wrong!
+      @micropost = Micropost.new(content: "Lorem ipsum", user_id: user.id)
+    end
+    
+
+from [Listing10.3](user-microposts.html#code-
+micropost_validity_test) with
+
+    
+    let(:user) { FactoryGirl.create(:user) }
+    before { @micropost = user.microposts.build(content: "Lorem ipsum") }
+    
+
+Once we define the proper associations, the resulting `@micropost` variable
+will automatically have `user_id` equal to its associated user.
+
+Building the micropost through the User association doesn't fix the security
+problem of having an accessible `user_id`, and because this is such an
+important security concern we'll add a failing test to catch it, as shown in
+[Listing10.5](user-microposts.html#code-
+attr_accessible_user_id_test).
+
+Listing 10.5. A test to ensure that the `user_id` isn't accessible.
+
+`spec/models/micropost_spec.rb`
+
+    
+    require 'spec_helper'
+    
+    describe Micropost do
+    
+      let(:user) { FactoryGirl.create(:user) }
+      before { @micropost = user.microposts.build(content: "Lorem ipsum") }
+    
+      subject { @micropost }
+      .
+      .
+      .
+      describe "accessible attributes" do
+        it "should not allow access to user_id" do
+          expect do
+            Micropost.new(user_id: user.id)
+          end.to raise_error(ActiveModel::MassAssignmentSecurity::Error)
+        end    
+      end
+    end
+    
+
+This test verifies that calling `Micropost.new` with a nonempty `user_id`
+raises a mass assignment security error exception. This behavior is on by
+default as of Rails3.2.3, but previous versions had it off,
+so you should make sure that your application is configured properly, as shown
+in [Listing10.6](user-microposts.html#code-
+application_whitelist).
+
+Listing 10.6. Ensuring that Rails throws errors on invalid mass assignment.
+
+`config/application.rb`
+
+    
+    .
+    .
+    .
+    module SampleApp
+      class Application < Rails::Application
+        .
+        .
+        .
+        config.active_record.whitelist_attributes = true
+        .
+        .
+        .
+      end
     end
     
 
